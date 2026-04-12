@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -97,7 +98,10 @@ app.post('/api/chat', async (req, res) => {
 
 // === UNIFICACIÓN DE FRONTEND Y BACKEND PARA HOSTING ===
 // Servimos los archivos estáticos de la carpeta `dist` de React
-const distPath = path.resolve(process.cwd(), '../dist');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const distPath = path.resolve(__dirname, '../dist');
+
 app.use(express.static(distPath));
 
 // Cualquier otra ruta que no sea de API, devuelve el index.html para que el router de React funcione.
