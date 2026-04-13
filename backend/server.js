@@ -105,9 +105,10 @@ app.post('/api/chat', async (req, res) => {
           lastError = error;
           attempts++;
           
-          // Si es un error 404 (Modelo no encontrado), no reintentamos este modelo, pasamos al siguiente
-          if (error.message?.includes('404')) {
-            console.warn(`❌ Modelo ${modelName} no encontrado (404). Probando siguiente...`);
+          // Si es un error 404 (Modelo no encontrado) o 429 (Cupo excedido), probamos el siguiente modelo
+          if (error.message?.includes('404') || error.message?.includes('429')) {
+            const reason = error.message?.includes('429') ? "Cupo excedido" : "No encontrado";
+            console.warn(`❌ Modelo ${modelName}: ${reason}. Probando siguiente...`);
             break; 
           }
 
