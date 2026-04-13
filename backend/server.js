@@ -61,31 +61,48 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const configuredModel = genAI.getGenerativeModel({
-      model: "gemini-flash-latest",
+      model: "gemini-1.5-flash", 
       systemInstruction: systemInstructionContent,
-      // tools: modelTools, // <-- COMENTADO TEMPORALMENTE para evitar gasto de cuota de búsqueda
     });
 
-    const result = await configuredModel.generateContent({
-      contents: contents.map(content => ({
-        role: content.role,
-        parts: content.parts.map(part => {
-          if (part.inlineData) {
-            return {
-              inlineData: {
-                data: part.inlineData.data,
-                mimeType: part.inlineData.mimeType
+    // Sistema de reintento automático para manejar errores 503 (Saturación de Google)
+    let result;
+    let attempts = 0;
+    const maxAttempts = 3;
+    
+    while (attempts < maxAttempts) {
+      try {
+        result = await configuredModel.generateContent({
+          contents: contents.map(content => ({
+            role: content.role,
+            parts: content.parts.map(part => {
+              if (part.inlineData) {
+                return {
+                  inlineData: {
+                    data: part.inlineData.data,
+                    mimeType: part.inlineData.mimeType
+                  }
+                };
               }
-            };
-          }
-          return { text: part.text };
-        })
-      })),
-      generationConfig: {
-        maxOutputTokens: generationConfig?.maxOutputTokens || 1200,
-        temperature: generationConfig?.temperature || 0.75,
-      },
-    });
+              return { text: part.text };
+            })
+          })),
+          generationConfig: {
+            maxOutputTokens: generationConfig?.maxOutputTokens || 1200,
+            temperature: generationConfig?.temperature || 0.75,
+          },
+        });
+        break; // Éxito, salimos del bucle
+      } catch (error) {
+        attempts++;
+        if (error.message?.includes('503') && attempts < maxAttempts) {
+          console.warn(`⚠️ Google 503 detectado. Reintento ${attempts}/${maxAttempts}...`);
+          await new Promise(resolve => setTimeout(resolve, 1500 * attempts)); // Espera exponencial
+          continue;
+        }
+        throw error; // Si no es 503 o superó intentos, lanzamos el error
+      }
+    }
     
     const response = await result.response;
     const text = response.text();
