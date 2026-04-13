@@ -184,13 +184,30 @@ function buildWAUrl(phone, message) {
 async function loadChatList() {
   const { data, error } = await supabase.from('valeria_chats').select('*').order('ts', { ascending: false });
   if (error || !data) return [];
-  return data;
+  // Map snake_case from DB to camelCase for Frontend
+  return data.map(c => ({
+    ...c,
+    prospectName: c.prospect_name,
+    googleMaps: c.google_maps,
+  }));
 }
 
 async function saveChatList(list) {
   if (!list || list.length === 0) return;
-  // Upsert the entire list to keep things synced
-  const { error } = await supabase.from('valeria_chats').upsert(list, { onConflict: 'id' });
+  // Map camelCase from Frontend to snake_case for DB
+  const mapped = list.map(c => ({
+    id: c.id,
+    title: c.title,
+    ts: c.ts,
+    preview: c.preview,
+    prospect_name: c.prospectName,
+    sector: c.sector,
+    phone: c.phone,
+    instagram: c.instagram,
+    google_maps: c.googleMaps,
+    stage: c.stage,
+  }));
+  const { error } = await supabase.from('valeria_chats').upsert(mapped, { onConflict: 'id' });
   if (error) console.error("Error validando chats:", error);
 }
 
@@ -202,10 +219,27 @@ async function loadChatMessages(id) {
 
 async function saveChatMessages(id, msgs) {
   if (!msgs || msgs.length === 0) return;
-  // Forma simple: borramos y reinsertamos el array para mantener el estado 1 a 1 sin complicar diffs locales
-  await supabase.from('valeria_messages').delete().eq('chat_id', id);
-  const rows = msgs.map(m => ({ chat_id: id, role: m.role, content: m.content, sources: m.sources || [] }));
-  await supabase.from('valeria_messages').insert(rows);
+  try {
+    // Current strategy: delete and re-insert to keep state 1:1 without complex diffing.
+    // We add a safety check: only insert if delete was successful or didn't error.
+    const { error: delError } = await supabase.from('valeria_messages').delete().eq('chat_id', id);
+    if (delError) {
+      console.error("Error clearing old messages:", delError);
+      return;
+    }
+
+    const rows = msgs.map(m => ({ 
+      chat_id: id, 
+      role: m.role, 
+      content: m.content, 
+      sources: m.sources || [] 
+    }));
+    
+    const { error: insError } = await supabase.from('valeria_messages').insert(rows);
+    if (insError) console.error("Error saving messages:", insError);
+  } catch (err) {
+    console.error("Critical error in saveChatMessages:", err);
+  }
 }
 
 async function loadMemory() {
@@ -666,6 +700,7 @@ export default function App() {
   const [renamingChat, setRenamingChat] = useState(null); // id of chat being renamed
   const [renameText, setRenameText] = useState("");
   const [ready, setReady] = useState(false);
+  const [dbError, setDbError] = useState(null);
 
   // Panel states
   const [showDashboard, setShowDashboard] = useState(false);
@@ -699,24 +734,54 @@ export default function App() {
   // Load on mount
   useEffect(() => {
     (async () => {
-      const [list, mem, prof] = await Promise.all([loadChatList(), loadMemory(), loadProfile()]);
-      
-      // Mapeo inverso de snake_case a camelCase para el profile de Supabase
-      const mappedProfile = prof.owner_name ? {
-        ownerName: prof.owner_name,
-        deliveryLanding: prof.delivery_landing,
-        deliveryWeb: prof.delivery_web,
-        deliveryEcommerce: prof.delivery_ecommerce,
-        paymentMethods: prof.payment_methods,
-        paymentTerms: prof.payment_terms,
-        portfolioUrl: prof.portfolio_url,
-        extraNotes: prof.extra_notes,
-      } : prof;
+      try {
+        const [listRes, memRes, profRes] = await Promise.all([
+          supabase.from('valeria_chats').select('*').order('ts', { ascending: false }),
+          supabase.from('valeria_memory').select('memory_text').order('updated_at', { ascending: false }).limit(1),
+          supabase.from('valeria_profile').select('*').limit(1)
+        ]);
 
-      setChatList(list || []);
-      setMemory(mem || "");
-      setProfile(mappedProfile);
-      setReady(true);
+        if (listRes.error) throw new Error(`Error cargando chats: ${listRes.error.message}`);
+        
+        const list = listRes.data;
+        const mem = memRes.data?.[0]?.memory_text || "";
+        const prof = profRes.data?.[0] || DEFAULT_PROFILE;
+
+        // Reverse mapping from snake_case to camelCase for Supabase profile
+        const mappedProfile = prof.owner_name ? {
+          ownerName: prof.owner_name,
+          deliveryLanding: prof.delivery_landing,
+          deliveryWeb: prof.delivery_web,
+          deliveryEcommerce: prof.delivery_ecommerce,
+          paymentMethods: prof.payment_methods,
+          paymentTerms: prof.payment_terms,
+          portfolioUrl: prof.portfolio_url,
+          extraNotes: prof.extra_notes,
+        } : prof;
+
+        const mappedList = list.map(c => ({
+          ...c,
+          prospectName: c.prospect_name,
+          googleMaps: c.google_maps,
+        }));
+
+        setChatList(mappedList || []);
+        setMemory(mem || "");
+        setProfile(mappedProfile);
+
+        // Restore last active chat
+        const lastId = localStorage.getItem("valeria_active_chat_id");
+        if (lastId && mappedList?.some(c => c.id === lastId)) {
+          const msgs = await loadChatMessages(lastId);
+          setActiveChatId(lastId);
+          setMessages(msgs.length ? msgs : [WELCOME]);
+        }
+      } catch (err) {
+        console.error("Supabase Init Error:", err);
+        setDbError(err.message);
+      } finally {
+        setReady(true);
+      }
     })();
   }, []);
 
@@ -725,6 +790,7 @@ export default function App() {
   // ── Chat operations ──
   const newChat = useCallback(() => {
     setActiveChatId(null);
+    localStorage.removeItem("valeria_active_chat_id");
     setMessages([WELCOME]);
     setInput("");
     setShowNewChat(true);
@@ -738,6 +804,7 @@ export default function App() {
     const updated = [newEntry, ...chatList];
     setChatList(updated);
     setActiveChatId(currentId);
+    localStorage.setItem("valeria_active_chat_id", currentId);
     setInput("");
     
     // Silently auto-send first message: Valeria investigates on her own
@@ -800,18 +867,22 @@ export default function App() {
   const openChat = useCallback(async (id) => {
     const msgs = await loadChatMessages(id);
     setActiveChatId(id);
+    localStorage.setItem("valeria_active_chat_id", id);
     setMessages(msgs.length ? msgs : [WELCOME]);
     setInput("");
   }, []);
 
-  // Soft-delete: removes chat from list but keeps memory intact
+  // Hard-delete: removes from both state and database
   const handleDelete = useCallback(async (id) => {
-    // Only remove from chat list — do NOT call deleteChat(id) to preserve localStorage messages
-    // Memory (valeria_memory) is a separate key and is never touched here
     const updated = chatList.filter(c => c.id !== id);
     setChatList(updated);
     await saveChatList(updated);
-    if (activeChatId === id) { setActiveChatId(null); setMessages([WELCOME]); }
+    await deleteChat(id); // Ensure it's removed from Supabase
+    if (activeChatId === id) { 
+      setActiveChatId(null); 
+      localStorage.removeItem("valeria_active_chat_id");
+      setMessages([WELCOME]); 
+    }
     setConfirmDel(null);
     setChatMenu(null);
   }, [chatList, activeChatId]);
@@ -964,6 +1035,15 @@ export default function App() {
   return (
     <div style={{ display: "flex", height: "100%", minHeight: 680, background: G.bgGradient, borderRadius: 14, overflow: "hidden", border: `1px solid ${G.border}`, position: "relative", fontFamily: "'Inter',sans-serif" }}>
       <style>{css}</style>
+
+      {dbError && (
+        <div style={{ position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)", zIndex: 9999, background: G.danger, color: "#fff", padding: "8px 16px", borderRadius: 8, fontSize: 11, fontWeight: 500, boxShadow: "0 4px 20px rgba(0,0,0,0.5)", border: "1px solid rgba(255,255,255,0.2)", display: "flex", alignItems: "center", gap: 10 }}>
+          <span>⚠️</span>
+          <span>Error de Base de Datos: {dbError}</span>
+          <button onClick={() => window.location.reload()} style={{ background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", padding: "4px 8px", borderRadius: 4, cursor: "pointer", fontSize: 9 }}>Reintentar</button>
+          <button onClick={() => setDbError(null)} style={{ background: "transparent", border: "none", color: "#fff", opacity: 0.6, cursor: "pointer" }}>✕</button>
+        </div>
+      )}
 
       {/* ═══ SIDEBAR ══════════════════════════════════════════════════════════ */}
       {sidebarOpen && (
