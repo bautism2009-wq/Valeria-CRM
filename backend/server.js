@@ -60,73 +60,49 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    // Lista de modelos a intentar. Usamos específicas versiones "latest" y "8b" que suelen tener más permisos en cuentas nuevas.
-    const modelNames = ["gemini-1.5-flash-latest", "gemini-1.5-flash-8b"];
+    const configuredModel = genAI.getGenerativeModel({
+      model: "gemini-1.5-flash",
+      systemInstruction: systemInstructionContent,
+    });
+
     let result;
-    let success = false;
-    let lastError;
+    let attempts = 0;
+    const maxAttempts = 3;
 
-    for (const modelName of modelNames) {
-      if (success) break;
-
-      const configuredModel = genAI.getGenerativeModel({
-        model: modelName, 
-        systemInstruction: systemInstructionContent,
-      });
-
-      let attempts = 0;
-      const maxAttempts = 5; // Aumentamos a 5 reintentos para ser más persistentes
-
-      while (attempts < maxAttempts) {
-        try {
-          // ... (existing code for generateContent)
-          // (No cambio la lógica interna, solo los parámetros de reintento)
-          result = await configuredModel.generateContent({
-            contents: contents.map(content => ({
-              role: content.role,
-              parts: content.parts.map(part => {
-                if (part.inlineData) {
-                  return {
-                    inlineData: {
-                      data: part.inlineData.data,
-                      mimeType: part.inlineData.mimeType
-                    }
-                  };
-                }
-                return { text: part.text };
-              })
-            })),
-            generationConfig: {
-              maxOutputTokens: generationConfig?.maxOutputTokens || 1200,
-              temperature: generationConfig?.temperature || 0.75,
-            },
-          });
-          success = true;
-          break; 
-        } catch (error) {
-          lastError = error;
-          attempts++;
-          
-          if (error.message?.includes('404') || error.message?.includes('429')) {
-            const reason = error.message?.includes('429') ? "Cupo excedido" : "No encontrado";
-            console.warn(`❌ Modelo ${modelName}: ${reason}. Probando siguiente...`);
-            break; 
-          }
-
-          if (error.message?.includes('503') && attempts < maxAttempts) {
-            console.warn(`⚠️ Google 503 en ${modelName}. Reintento ${attempts}/${maxAttempts} (esperando ${2 * attempts}s)...`);
-            await new Promise(resolve => setTimeout(resolve, 2000 * attempts)); // Más tiempo de espera
-            continue;
-          }
-          break; 
+    while (attempts < maxAttempts) {
+      try {
+        result = await configuredModel.generateContent({
+          contents: contents.map(content => ({
+            role: content.role,
+            parts: content.parts.map(part => {
+              if (part.inlineData) {
+                return {
+                  inlineData: {
+                    data: part.inlineData.data,
+                    mimeType: part.inlineData.mimeType
+                  }
+                };
+              }
+              return { text: part.text };
+            })
+          })),
+          generationConfig: {
+            maxOutputTokens: generationConfig?.maxOutputTokens || 1200,
+            temperature: generationConfig?.temperature || 0.75,
+          },
+        });
+        break; // Éxito
+      } catch (error) {
+        attempts++;
+        if (error.message?.includes('503') && attempts < maxAttempts) {
+          console.warn(`⚠️ Google 503 detectado. Reintento ${attempts}/${maxAttempts}...`);
+          await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
+          continue;
         }
+        throw error; // Se lanza el error original (ej. 429 o 400) a la consola y al front
       }
     }
 
-    if (!success) {
-      throw lastError || new Error("No se pudo conectar con ningún modelo de Google");
-    }
-    
     const response = await result.response;
     const text = response.text();
     
