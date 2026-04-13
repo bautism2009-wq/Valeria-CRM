@@ -60,48 +60,70 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    const configuredModel = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash", 
-      systemInstruction: systemInstructionContent,
-    });
-
-    // Sistema de reintento automático para manejar errores 503 (Saturación de Google)
+    // Lista de modelos a intentar en orden de preferencia
+    const modelNames = ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-flash-latest"];
     let result;
-    let attempts = 0;
-    const maxAttempts = 3;
-    
-    while (attempts < maxAttempts) {
-      try {
-        result = await configuredModel.generateContent({
-          contents: contents.map(content => ({
-            role: content.role,
-            parts: content.parts.map(part => {
-              if (part.inlineData) {
-                return {
-                  inlineData: {
-                    data: part.inlineData.data,
-                    mimeType: part.inlineData.mimeType
-                  }
-                };
-              }
-              return { text: part.text };
-            })
-          })),
-          generationConfig: {
-            maxOutputTokens: generationConfig?.maxOutputTokens || 1200,
-            temperature: generationConfig?.temperature || 0.75,
-          },
-        });
-        break; // Éxito, salimos del bucle
-      } catch (error) {
-        attempts++;
-        if (error.message?.includes('503') && attempts < maxAttempts) {
-          console.warn(`⚠️ Google 503 detectado. Reintento ${attempts}/${maxAttempts}...`);
-          await new Promise(resolve => setTimeout(resolve, 1500 * attempts)); // Espera exponencial
-          continue;
+    let success = false;
+    let lastError;
+
+    for (const modelName of modelNames) {
+      if (success) break;
+
+      const configuredModel = genAI.getGenerativeModel({
+        model: modelName, 
+        systemInstruction: systemInstructionContent,
+      });
+
+      let attempts = 0;
+      const maxAttempts = modelName === modelNames[0] ? 3 : 1; // Más reintentos al modelo principal
+
+      while (attempts < maxAttempts) {
+        try {
+          result = await configuredModel.generateContent({
+            contents: contents.map(content => ({
+              role: content.role,
+              parts: content.parts.map(part => {
+                if (part.inlineData) {
+                  return {
+                    inlineData: {
+                      data: part.inlineData.data,
+                      mimeType: part.inlineData.mimeType
+                    }
+                  };
+                }
+                return { text: part.text };
+              })
+            })),
+            generationConfig: {
+              maxOutputTokens: generationConfig?.maxOutputTokens || 1200,
+              temperature: generationConfig?.temperature || 0.75,
+            },
+          });
+          success = true;
+          break; // Éxito total
+        } catch (error) {
+          lastError = error;
+          attempts++;
+          
+          // Si es un error 404 (Modelo no encontrado), no reintentamos este modelo, pasamos al siguiente
+          if (error.message?.includes('404')) {
+            console.warn(`❌ Modelo ${modelName} no encontrado (404). Probando siguiente...`);
+            break; 
+          }
+
+          // Si es un error 503 (Saturación), reintentamos con espera
+          if (error.message?.includes('503') && attempts < maxAttempts) {
+            console.warn(`⚠️ Google 503 en ${modelName}. Reintento ${attempts}/${maxAttempts}...`);
+            await new Promise(resolve => setTimeout(resolve, 1500 * attempts));
+            continue;
+          }
+          break; // Otro error, salir del bucle de reintentos
         }
-        throw error; // Si no es 503 o superó intentos, lanzamos el error
       }
+    }
+
+    if (!success) {
+      throw lastError || new Error("No se pudo conectar con ningún modelo de Google");
     }
     
     const response = await result.response;
