@@ -60,8 +60,8 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    // Lista de modelos a intentar en orden de preferencia (incluyendo Pro como último recurso)
-    const modelNames = ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro-latest", "gemini-1.5-pro", "gemini-flash-latest"];
+    // Lista de modelos a intentar. Eliminamos "gemini-flash-latest" porque Google lo asigna a versiones con solo 20 mensajes de límite.
+    const modelNames = ["gemini-1.5-flash", "gemini-1.5-pro"];
     let result;
     let success = false;
     let lastError;
@@ -75,10 +75,12 @@ app.post('/api/chat', async (req, res) => {
       });
 
       let attempts = 0;
-      const maxAttempts = modelName === modelNames[0] ? 3 : 1; // Más reintentos al modelo principal
+      const maxAttempts = 5; // Aumentamos a 5 reintentos para ser más persistentes
 
       while (attempts < maxAttempts) {
         try {
+          // ... (existing code for generateContent)
+          // (No cambio la lógica interna, solo los parámetros de reintento)
           result = await configuredModel.generateContent({
             contents: contents.map(content => ({
               role: content.role,
@@ -100,25 +102,23 @@ app.post('/api/chat', async (req, res) => {
             },
           });
           success = true;
-          break; // Éxito total
+          break; 
         } catch (error) {
           lastError = error;
           attempts++;
           
-          // Si es un error 404 (Modelo no encontrado) o 429 (Cupo excedido), probamos el siguiente modelo
           if (error.message?.includes('404') || error.message?.includes('429')) {
             const reason = error.message?.includes('429') ? "Cupo excedido" : "No encontrado";
             console.warn(`❌ Modelo ${modelName}: ${reason}. Probando siguiente...`);
             break; 
           }
 
-          // Si es un error 503 (Saturación), reintentamos con espera
           if (error.message?.includes('503') && attempts < maxAttempts) {
-            console.warn(`⚠️ Google 503 en ${modelName}. Reintento ${attempts}/${maxAttempts}...`);
-            await new Promise(resolve => setTimeout(resolve, 1500 * attempts));
+            console.warn(`⚠️ Google 503 en ${modelName}. Reintento ${attempts}/${maxAttempts} (esperando ${2 * attempts}s)...`);
+            await new Promise(resolve => setTimeout(resolve, 2000 * attempts)); // Más tiempo de espera
             continue;
           }
-          break; // Otro error, salir del bucle de reintentos
+          break; 
         }
       }
     }
