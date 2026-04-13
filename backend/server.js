@@ -66,7 +66,20 @@ app.post('/api/chat', async (req, res) => {
     });
 
     const result = await configuredModel.generateContent({
-      contents: contents,
+      contents: contents.map(content => ({
+        role: content.role,
+        parts: content.parts.map(part => {
+          if (part.inlineData) {
+            return {
+              inlineData: {
+                data: part.inlineData.data,
+                mimeType: part.inlineData.mimeType
+              }
+            };
+          }
+          return { text: part.text };
+        })
+      })),
       generationConfig: {
         maxOutputTokens: generationConfig?.maxOutputTokens || 1200,
         temperature: generationConfig?.temperature || 0.75,

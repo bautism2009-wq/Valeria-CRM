@@ -304,6 +304,14 @@ async function deleteChat(id) {
 
 const WELCOME = { role: "assistant", content: "Bau, bienvenido.\n\nDame el rubro y lo que sepas del cliente. Te armo el mensaje exacto." };
 
+// Multimedia Helpers
+const fileToBase64 = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.readAsDataURL(file);
+  reader.onload = () => resolve(reader.result.split(',')[1]);
+  reader.onerror = error => reject(error);
+});
+
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 4. GLOBAL CSS
@@ -713,6 +721,13 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [dbError, setDbError] = useState(null);
 
+  // Multimedia states
+  const [attachments, setAttachments] = useState([]); // [{ name, type, data }]
+  const [isRecording, setIsRecording] = useState(false);
+  const recorderRef = useRef(null);
+  const audioChunks = useRef([]);
+  const fileInputRef = useRef(null);
+
   // Panel states
   const [showDashboard, setShowDashboard] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
@@ -925,6 +940,46 @@ export default function App() {
     await saveProfile(newProfile);
   }, []);
 
+  // Multimedia operations
+  const handleFileSelect = async (e) => {
+    const files = Array.from(e.target.files);
+    for (const file of files) {
+      if (file.size > 10 * 1024 * 1024) { alert("Archivo demasiado grande (máx 10MB)"); continue; }
+      const data = await fileToBase64(file);
+      setAttachments(prev => [...prev, { name: file.name, type: file.type, data }]);
+    }
+    e.target.value = null; // Clear input
+  };
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      recorderRef.current = recorder;
+      audioChunks.current = [];
+
+      recorder.ondataavailable = (e) => audioChunks.current.push(e.data);
+      recorder.onstop = async () => {
+        const blob = new Blob(audioChunks.current, { type: 'audio/webm' });
+        const data = await fileToBase64(blob);
+        setAttachments(prev => [...prev, { name: "Nota de voz.webm", type: 'audio/webm', data }]);
+        stream.getTracks().forEach(t => t.stop());
+      };
+
+      recorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      alert("No se pudo acceder al micrófono");
+    }
+  };
+
+  const stopRecording = () => {
+    if (recorderRef.current && isRecording) {
+      recorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
   // ── Send message (Gemini API — Fix 2: key from env) ──
   const send = useCallback(async () => {
     const text = input.trim();
@@ -942,16 +997,33 @@ export default function App() {
       await saveChatList(currentList, setDbError);
     }
 
-    const updated = [...messages, { role: "user", content: text }];
+    const userPart = { text: text };
+    const attachmentParts = attachments.map(a => ({
+      inlineData: { data: a.data, mimeType: a.type }
+    }));
+
+    const newUserMsg = { role: "user", content: text, attachments: attachments.map(a => ({ name: a.name, type: a.type })) };
+    const updated = [...messages, newUserMsg];
+    
     setMessages(updated);
     setInput("");
+    setAttachments([]);
     setLoading(true);
 
     try {
-      const contents = updated.map(m => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.content }],
-      }));
+      const contents = updated.map(m => {
+        const parts = [{ text: m.content }];
+        // If it's the latest message and we have attachments, add them to parts
+        // Note: For simplicity, we only send attachments of the CURRENT message to the API 
+        // to avoid huge payloads in history, but Gemini 1.5 handle history well.
+        if (m === newUserMsg && attachmentParts.length > 0) {
+          parts.push(...attachmentParts);
+        }
+        return {
+          role: m.role === "assistant" ? "model" : "user",
+          parts
+        };
+      });
 
       const res = await fetch(`/api/chat`, {
         method: "POST",
@@ -1214,7 +1286,17 @@ export default function App() {
               {msg.role === "user" ? (
                 <div style={{ maxWidth: "78%", padding: "10px 14px", borderRadius: "12px 12px 3px 12px", background: `linear-gradient(135deg,${G.blueBg},rgba(10,24,40,0.3))`, border: `1px solid ${G.blueBorder}`, borderRight: `2.5px solid ${G.blue}`, boxShadow: "0 2px 12px rgba(0,0,0,0.2)" }}>
                   <span style={{ display: "block", fontSize: 9, color: G.blueText, marginBottom: 4, fontWeight: 600, letterSpacing: "2px", textTransform: "uppercase" }}>{activeChat?.prospectName ? "Bau" : "Bau"}</span>
-                  <p style={{ margin: 0, fontSize: 13, lineHeight: "1.7", color: G.text, whiteSpace: "pre-wrap", fontWeight: 300 }}>{msg.content}</p>
+                  <p style={{ margin: "0 0 8px", fontSize: 13, lineHeight: "1.7", color: G.text, whiteSpace: "pre-wrap", fontWeight: 300 }}>{msg.content}</p>
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", borderTop: `1px solid ${G.blueBorder}`, paddingTop: 6, marginTop: 4 }}>
+                      {msg.attachments.map((at, j) => (
+                        <div key={j} style={{ fontSize: 9, color: G.blueText, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4, display: "flex", alignItems: "center", gap: 4 }}>
+                          <span>{at.type.startsWith('image/') ? '🖼️' : at.type.startsWith('audio/') ? '🎙️' : '📄'}</span>
+                          <span>{at.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: `linear-gradient(160deg,${G.surface},${G.surface2})`, border: `1px solid ${G.border}`, boxShadow: `0 4px 20px rgba(0,0,0,0.15)` }}>
@@ -1231,16 +1313,15 @@ export default function App() {
           {loading && (
             <div style={{ width: "100%", padding: "14px 16px", borderRadius: 12, background: `linear-gradient(160deg,${G.surface},${G.surface2})`, border: `1px solid ${G.border}`, animation: "fadeUp 0.3s ease" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
-                <ValeriaAvatar size={14} pulse />
-                <span style={{ fontSize: 9, color: G.gold, fontWeight: 600, letterSpacing: "2.5px", textTransform: "uppercase" }}>Valeria Investigando...</span>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  {[0, 1, 2].map(i => <div key={i} style={{ width: 5, height: 5, borderRadius: "50%", background: `linear-gradient(135deg,${G.gold},${G.goldLight})`, animation: "blink 1.4s ease-in-out infinite", animationDelay: `${i * 0.2}s` }} />)}
-                  <span style={{ fontSize: 11, color: G.textSoft, marginLeft: 6, fontWeight: 400, letterSpacing: "0.3px" }}>
-                    {loadingSteps[loadingStep]}
-                  </span>
+                  <span style={{ fontSize: 9, color: G.gold, fontWeight: 600, letterSpacing: "2.5px", textTransform: "uppercase" }}>Valeria Procesando...</span>
                 </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    {[0, 1, 2].map(i => <div key={i} style={{ width: 5, height: 5, borderRadius: "50%", background: `linear-gradient(135deg,${G.gold},${G.goldLight})`, animation: "blink 1.4s ease-in-out infinite", animationDelay: `${i * 0.2}s` }} />)}
+                    <span style={{ fontSize: 11, color: G.textSoft, marginLeft: 6, fontWeight: 400, letterSpacing: "0.3px" }}>
+                      {loadingSteps[loadingStep] || "Valeria está analizando los archivos..."}
+                    </span>
+                  </div>
                 {/* Progress bar visual */}
                 <div style={{ width: "100%", height: 3, background: G.surface3, borderRadius: 2, overflow: "hidden" }}>
                   <div style={{ width: `${((loadingStep + 1) / loadingSteps.length) * 100}%`, height: "100%", background: `linear-gradient(90deg,${G.goldDim},${G.gold})`, transition: "width 0.8s ease" }} />
@@ -1253,23 +1334,45 @@ export default function App() {
 
         {/* Input area */}
         <div style={{ padding: "10px 14px 14px", borderTop: `1px solid ${G.border}`, background: G.surfaceGlass, flexShrink: 0 }}>
-          <div style={{ marginBottom: 8, display: "flex", gap: 5, flexWrap: "wrap" }}>
+          
+          {/* Attachments Preview */}
+          {attachments.length > 0 && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+              {attachments.map((a, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, background: G.surface2, border: `1px solid ${G.borderGold}`, borderRadius: 6, padding: "4px 8px", animation: "fadeUp 0.2s ease" }}>
+                  <span style={{ fontSize: 10, color: G.gold }}>{a.type.startsWith('image/') ? '🖼️' : a.type.startsWith('audio/') ? '🎙️' : '📄'}</span>
+                  <span style={{ fontSize: 10, color: G.textSoft, maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</span>
+                  <button className="v-btn" onClick={() => setAttachments(prev => prev.filter((_, idx) => idx !== i))} style={{ fontSize: 10, color: G.textDim }}>✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ marginBottom: 8, display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
             {quickReplies.map(s => (
               <button key={s} className="v-btn v-quick" onClick={() => setInput(s)}
                 style={{ fontSize: 10, padding: "4px 10px", borderRadius: 5, border: `1px solid ${G.border}`, color: G.textMuted }}>
                 {s}
               </button>
             ))}
+            <div style={{ flex: 1 }} />
+            <input type="file" ref={fileInputRef} onChange={handleFileSelect} multiple style={{ display: "none" }} accept="image/*,application/pdf" />
+            <button className="v-btn" onClick={() => fileInputRef.current.click()} style={{ fontSize: 14, color: G.textMuted, padding: "4px 8px" }} title="Adjuntar Captura o PDF">📎</button>
+            <button className="v-btn" onClick={isRecording ? stopRecording : startRecording} 
+              style={{ fontSize: 14, color: isRecording ? G.dangerText : G.textMuted, padding: "4px 8px", animation: isRecording ? "breathe 1.5s infinite" : "none" }} 
+              title={isRecording ? "Detener Grabación" : "Grabar Nota de Voz"}>
+              {isRecording ? "🛑" : "🎙️"}
+            </button>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
             <textarea className="v-input-base" value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKey}
-              placeholder="Rubro del cliente o respuesta que recibiste..." rows={2}
-              style={{ flex: 1, maxHeight: 100, overflowY: "auto" }} />
-            <button className="v-btn" onClick={send} disabled={loading || !input.trim()}
-              style={{ padding: "9px 16px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: loading || !input.trim() ? "not-allowed" : "pointer", opacity: loading || !input.trim() ? 0.25 : 1, background: `linear-gradient(135deg,${G.gold}CC,${G.goldLight}BB)`, color: "#0A0A0A", letterSpacing: "0.5px", alignSelf: "flex-end", flexShrink: 0, boxShadow: loading || !input.trim() ? "none" : `0 2px 12px ${G.goldGlow}`, transition: "opacity 0.2s,box-shadow 0.3s,transform 0.15s" }}
-              onMouseEnter={e => { if (!loading && input.trim()) { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = `0 4px 20px ${G.goldGlow}`; } }}
+              placeholder={isRecording ? "Grabando voz..." : "Rubro del cliente o respuesta que recibiste..."} rows={2}
+              style={{ flex: 1, maxHeight: 100, overflowY: "auto", border: isRecording ? `1px solid ${G.danger}` : `1px solid ${G.border}` }} />
+            <button className="v-btn" onClick={send} disabled={loading || (input.trim() === "" && attachments.length === 0)}
+              style={{ padding: "9px 16px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: loading || (input.trim() === "" && attachments.length === 0) ? "not-allowed" : "pointer", opacity: loading || (input.trim() === "" && attachments.length === 0) ? 0.25 : 1, background: `linear-gradient(135deg,${G.gold}CC,${G.goldLight}BB)`, color: "#0A0A0A", letterSpacing: "0.5px", alignSelf: "flex-end", flexShrink: 0, boxShadow: loading || (input.trim() === "" && attachments.length === 0) ? "none" : `0 2px 12px ${G.goldGlow}`, transition: "opacity 0.2s,box-shadow 0.3s,transform 0.15s" }}
+              onMouseEnter={e => { if (!loading && (input.trim() || attachments.length)) { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = `0 4px 20px ${G.goldGlow}`; } }}
               onMouseLeave={e => { e.currentTarget.style.transform = "translateY(0)"; }}>
-              Enviar
+              {attachments.length > 0 ? "Enviar Con Adjuntos" : "Enviar"}
             </button>
           </div>
         </div>
