@@ -60,8 +60,8 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    // Lista de modelos a intentar en orden de preferencia
-    const modelNames = ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-flash-latest"];
+    // Lista de modelos a intentar en orden de preferencia (incluyendo Pro como último recurso)
+    const modelNames = ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro-latest", "gemini-1.5-pro", "gemini-flash-latest"];
     let result;
     let success = false;
     let lastError;
