@@ -192,23 +192,31 @@ async function loadChatList() {
   }));
 }
 
-async function saveChatList(list) {
+async function saveChatList(list, setError) {
   if (!list || list.length === 0) return;
-  // Map camelCase from Frontend to snake_case for DB
-  const mapped = list.map(c => ({
-    id: c.id,
-    title: c.title,
-    ts: c.ts,
-    preview: c.preview,
-    prospect_name: c.prospectName,
-    sector: c.sector,
-    phone: c.phone,
-    instagram: c.instagram,
-    google_maps: c.googleMaps,
-    stage: c.stage,
-  }));
-  const { error } = await supabase.from('valeria_chats').upsert(mapped, { onConflict: 'id' });
-  if (error) console.error("Error validando chats:", error);
+  try {
+    // Map camelCase from Frontend to snake_case for DB
+    const mapped = list.map(c => ({
+      id: c.id,
+      title: c.title,
+      ts: c.ts,
+      preview: c.preview,
+      prospect_name: c.prospectName,
+      sector: c.sector,
+      phone: c.phone,
+      instagram: c.instagram,
+      google_maps: c.googleMaps,
+      stage: c.stage,
+    }));
+    const { error } = await supabase.from('valeria_chats').upsert(mapped, { onConflict: 'id' });
+    if (error) {
+      console.error("Error guardando chats:", error);
+      if (setError) setError(`Error al guardar chats: ${error.message}`);
+    }
+  } catch (err) {
+    console.error("Critical error in saveChatList:", err);
+    if (setError) setError(`Error crítico al guardar chats: ${err.message}`);
+  }
 }
 
 async function loadChatMessages(id) {
@@ -217,14 +225,13 @@ async function loadChatMessages(id) {
   return data.map(m => ({ role: m.role, content: m.content, sources: m.sources }));
 }
 
-async function saveChatMessages(id, msgs) {
+async function saveChatMessages(id, msgs, setError) {
   if (!msgs || msgs.length === 0) return;
   try {
-    // Current strategy: delete and re-insert to keep state 1:1 without complex diffing.
-    // We add a safety check: only insert if delete was successful or didn't error.
     const { error: delError } = await supabase.from('valeria_messages').delete().eq('chat_id', id);
     if (delError) {
       console.error("Error clearing old messages:", delError);
+      if (setError) setError(`Error al limpiar mensajes: ${delError.message}`);
       return;
     }
 
@@ -236,9 +243,13 @@ async function saveChatMessages(id, msgs) {
     }));
     
     const { error: insError } = await supabase.from('valeria_messages').insert(rows);
-    if (insError) console.error("Error saving messages:", insError);
+    if (insError) {
+      console.error("Error saving messages:", insError);
+      if (setError) setError(`Error al guardar mensajes: ${insError.message}`);
+    }
   } catch (err) {
     console.error("Critical error in saveChatMessages:", err);
+    if (setError) setError(`Error crítico al guardar mensajes: ${err.message}`);
   }
 }
 
@@ -814,7 +825,7 @@ export default function App() {
     const initialMsgs = [WELCOME, { role: "user", content: autoMsg }];
     setMessages(initialMsgs);
     setLoading(true);
-    await saveChatList(updated);
+    await saveChatList(updated, setDbError);
 
     try {
       const contents = initialMsgs.map(m => ({
@@ -853,12 +864,12 @@ export default function App() {
       const clean = cleanMessage(raw);
       const finalMsgs = [...initialMsgs, { role: "assistant", content: clean, sources }];
       setMessages(finalMsgs);
-      await saveChatMessages(currentId, finalMsgs);
+      await saveChatMessages(currentId, finalMsgs, setDbError);
     } catch (e) {
       console.error("Auto-research error:", e);
       const errMsgs = [...initialMsgs, { role: "assistant", content: `Error al investigar: ${e.message}. Probá de nuevo en unos segundos.` }];
       setMessages(errMsgs);
-      await saveChatMessages(currentId, errMsgs);
+      await saveChatMessages(currentId, errMsgs, setDbError);
     } finally {
       setLoading(false);
     }
@@ -876,7 +887,7 @@ export default function App() {
   const handleDelete = useCallback(async (id) => {
     const updated = chatList.filter(c => c.id !== id);
     setChatList(updated);
-    await saveChatList(updated);
+    await saveChatList(updated, setDbError);
     await deleteChat(id); // Ensure it's removed from Supabase
     if (activeChatId === id) { 
       setActiveChatId(null); 
@@ -928,7 +939,7 @@ export default function App() {
       currentList = [newEntry, ...chatList];
       setChatList(currentList);
       setActiveChatId(currentId);
-      await saveChatList(currentList);
+      await saveChatList(currentList, setDbError);
     }
 
     const updated = [...messages, { role: "user", content: text }];
@@ -978,13 +989,13 @@ export default function App() {
 
       const updatedList = currentList.map(c => c.id === currentId ? { ...c, preview: text.slice(0, 60), ts: Date.now(), stage: c.stage || "new" } : c);
       setChatList(updatedList);
-      await saveChatList(updatedList);
-      await saveChatMessages(currentId, finalMsgs);
+      await saveChatList(updatedList, setDbError);
+      await saveChatMessages(currentId, finalMsgs, setDbError);
     } catch (e) {
       console.error("Gemini error:", e);
       const errMsg = [...updated, { role: "assistant", content: `Error al conectar con Google: ${e.message}. Revisá tu API Key en el archivo .env.` }];
       setMessages(errMsg);
-      if (currentId) await saveChatMessages(currentId, errMsg);
+      if (currentId) await saveChatMessages(currentId, errMsg, setDbError);
     } finally {
       setLoading(false);
     }
