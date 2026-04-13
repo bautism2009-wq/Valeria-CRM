@@ -60,8 +60,8 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    // Lista de modelos a intentar. Eliminamos "gemini-flash-latest" porque Google lo asigna a versiones con solo 20 mensajes de límite.
-    const modelNames = ["gemini-1.5-flash", "gemini-1.5-pro"];
+    // Lista de modelos a intentar. Usamos específicas versiones "latest" y "8b" que suelen tener más permisos en cuentas nuevas.
+    const modelNames = ["gemini-1.5-flash-latest", "gemini-1.5-flash-8b"];
     let result;
     let success = false;
     let lastError;
