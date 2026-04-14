@@ -13,20 +13,15 @@ const port = process.env.PORT || 3000;
 
 // Configuración recomendada para permitir peticiones del frontend en Vite
 app.use(cors({
-  origin: '*', // En producción podrías restringir esto a tu domino específico
+  origin: '*',
   methods: ['GET', 'POST'],
 }));
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Inicializar Gemini
+// Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-// Usamos el modelo que estaba en tu App.jsx
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" }); 
-// Note: App.jsx was calling "gemini-flash-latest", we'll match that if needed, 
-// let's actually use gemini-1.5-flash as the equivalent modern version
-const flashModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', message: 'Backend Valeria funcionando' });
@@ -40,30 +35,41 @@ app.post('/api/chat', async (req, res) => {
       return res.status(400).json({ error: 'Faltan contenidos en la solicitud' });
     }
 
-    // Convertir el system_instruction string que pasaban en frontend
-    let systemInstructionContent = system_instruction?.parts?.[0]?.text || "";
+    // Extract system instruction
+    let systemInstructionText = system_instruction?.parts?.[0]?.text || "";
 
     if (instagramUrl) {
       const scrapedData = await scrapeInstagramProfile(instagramUrl);
       if (scrapedData) {
-        systemInstructionContent += "\n\n" + scrapedData;
+        systemInstructionText += "\n\n" + scrapedData;
       }
     }
-    
-    // Simplificamos los tools para evitar errores de esquema en el SDK de Node
-    // Si el frontend envía google_search, nos aseguramos que el SDK lo entienda
-    let modelTools = [];
-    if (tools && tools.length > 0) {
-      modelTools = tools.map(t => {
-        if (t.google_search) return { googleSearchRetrieval: {} };
-        return t;
-      });
-    }
 
-    const configuredModel = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
-      systemInstruction: systemInstructionContent,
+    // Configure model with system instruction
+    const model = genAI.getGenerativeModel({
+      model: "gemini-2.5-flash-lite",
+      systemInstruction: systemInstructionText,
+      generationConfig: {
+        maxOutputTokens: generationConfig?.maxOutputTokens || 1200,
+        temperature: generationConfig?.temperature || 0.75,
+      }
     });
+
+    // Convert contents to proper format
+    const chatContents = contents.map(c => ({
+      role: c.role === "assistant" ? "model" : "user",
+      parts: c.parts.map(p => {
+        if (p.inlineData) {
+          return {
+            inlineData: {
+              data: p.inlineData.data,
+              mimeType: p.inlineData.mimeType
+            }
+          };
+        }
+        return { text: p.text };
+      })
+    }));
 
     let result;
     let attempts = 0;
@@ -71,57 +77,50 @@ app.post('/api/chat', async (req, res) => {
 
     while (attempts < maxAttempts) {
       try {
-        result = await configuredModel.generateContent({
-          contents: contents.map(content => ({
-            role: content.role,
-            parts: content.parts.map(part => {
-              if (part.inlineData) {
-                return {
-                  inlineData: {
-                    data: part.inlineData.data,
-                    mimeType: part.inlineData.mimeType
-                  }
-                };
-              }
-              return { text: part.text };
-            })
-          })),
-          generationConfig: {
-            maxOutputTokens: generationConfig?.maxOutputTokens || 1200,
-            temperature: generationConfig?.temperature || 0.75,
-          },
+        console.log(`🔄 Intentando generación con Gemini (${attempts + 1}/${maxAttempts})...`);
+        
+        result = await model.generateContent({
+          contents: chatContents,
         });
-        break; // Éxito
+
+        const text = result.response.text();
+        const groundingMetadata = result.response.candidates?.[0]?.groundingMetadata;
+
+        console.log(`✅ Respuesta generada exitosamente`);
+
+        res.json({
+          success: true,
+          data: {
+            text: text,
+            groundingMetadata: groundingMetadata
+          }
+        });
+        return;
+
       } catch (error) {
         attempts++;
-        if (error.message?.includes('503') && attempts < maxAttempts) {
-          console.warn(`⚠️ Google 503 detectado. Reintento ${attempts}/${maxAttempts}...`);
-          await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
+        console.error(`❌ Intento ${attempts} falló:`, error.message);
+
+        const errorMessage = error.message || '';
+        const is503 = errorMessage.includes('503') || errorMessage.includes('Service Unavailable') || errorMessage.includes('high demand');
+        const is429 = errorMessage.includes('429') || errorMessage.includes('Too Many Requests');
+
+        if ((is503 || is429) && attempts < maxAttempts) {
+          const waitTime = is429 ? 5000 * attempts : 2000 * attempts;
+          console.warn(`⚠️ Error temporal (${is503 ? '503' : '429'}). Reintentando en ${waitTime}ms...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
           continue;
         }
-        throw error; // Se lanza el error original (ej. 429 o 400) a la consola y al front
+
+        throw error;
       }
     }
 
-    const response = await result.response;
-    const text = response.text();
-    
-    const groundingMetadata = response.candidates?.[0]?.groundingMetadata;
-
-    res.json({
-      success: true,
-      data: {
-        text: text,
-        groundingMetadata: groundingMetadata
-      }
-    });
-
   } catch (error) {
-    console.error('❌ ERROR GEMINI:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message,
-      details: "Revisá la consola del backend para más info" 
+    console.error('❌ ERROR en /api/chat:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });
